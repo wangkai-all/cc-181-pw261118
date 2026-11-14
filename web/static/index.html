@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>posdel · 位置删除湖表工作台</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">posdel</span>
+    <span class="tagline">不可变 Parquet + 行位置删除集合 · 本项目自有格式，非 Iceberg/Delta 兼容</span>
+  </div>
+  <div class="headinfo" id="headinfo">
+    <span class="pill pill-head" id="pill-head">未初始化</span>
+    <span class="pill" id="pill-format">posdel/1</span>
+    <span class="pill" id="pill-root"></span>
+    <button class="btn btn-ghost" id="btn-refresh">刷新</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <section class="card">
+      <h2>版本 <small>snapshot</small></h2>
+      <div class="snapshots" id="snapshot-list"></div>
+      <p class="hint">查询时选择版本，<strong>数据文件与删除记录都按该版本同时应用</strong>。
+        过期版本仍列在历史中但不可查询。</p>
+    </section>
+
+    <section class="card">
+      <h2>数据文件 <small>immutable parquet</small></h2>
+      <div class="files" id="file-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>维护 <small>reclaim / recovery</small></h2>
+      <div class="maintain">
+        <label class="row-label">保留最近快照数
+          <input type="number" id="keep-snapshots" value="1" min="0" step="1">
+        </label>
+        <div class="btn-row">
+          <button class="btn" id="btn-gc-preview">预览可回收范围</button>
+          <button class="btn btn-danger" id="btn-gc-apply" disabled>执行回收</button>
+        </div>
+        <div class="gc-result" id="gc-result"></div>
+        <div class="btn-row">
+          <button class="btn" id="btn-verify">校验数据文件</button>
+          <button class="btn" id="btn-recover">崩溃恢复</button>
+        </div>
+        <div class="verify-result" id="verify-result"></div>
+      </div>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="card toolbar-card">
+      <div class="query-controls">
+        <label>版本
+          <select id="query-snapshot"></select>
+        </label>
+        <label>视图
+          <select id="query-mode">
+            <option value="visible">当前可见行</option>
+            <option value="raw">原始行（含已删除）</option>
+          </select>
+        </label>
+        <label>文件
+          <select id="query-file"><option value="">全部文件</option></select>
+        </label>
+        <label>每页
+          <select id="query-limit">
+            <option>25</option><option selected>50</option><option>100</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" id="btn-query">查询</button>
+        <button class="btn btn-ghost" id="btn-add-filter">+ 条件（查询与删除共用）</button>
+      </div>
+      <div class="predicate-bar" id="predicate-bar"></div>
+      <div class="pager">
+        <button class="btn btn-ghost" id="btn-prev">上一页</button>
+        <span class="pageinfo" id="pageinfo">—</span>
+        <button class="btn btn-ghost" id="btn-next">下一页</button>
+        <span class="spacer"></span>
+        <span class="predicate-desc" id="predicate-desc"></span>
+      </div>
+    </section>
+
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table class="rows" id="rows-table">
+          <thead id="rows-head"></thead>
+          <tbody id="rows-body"></tbody>
+        </table>
+      </div>
+      <div class="legend">
+        <span class="legend-item"><span class="swatch swatch-visible"></span>可见行</span>
+        <span class="legend-item"><span class="swatch swatch-deleted"></span>已删除（原始行视图）</span>
+        <span class="legend-item"><span class="mono">pos</span> = 文件内 0 基行位置，删除记录就用它</span>
+      </div>
+    </section>
+
+    <div class="two-col">
+      <section class="card">
+        <h2>条件构建 / 删除 <small>查询筛选与删除共用；删除写入独立行位置集合</small></h2>
+        <div class="conditions" id="conditions"></div>
+        <div class="btn-row">
+          <button class="btn" id="btn-add-condition">+ 条件</button>
+          <label class="row-label inline">匹配
+            <select id="match-mode"><option value="all">全部条件 (AND)</option><option value="any">任一条件 (OR)</option></select>
+          </label>
+        </div>
+        <label class="row-label">删除说明
+          <input type="text" id="delete-reason" maxlength="500" placeholder="例如：清理异常观测值">
+        </label>
+        <div class="btn-row">
+          <button class="btn" id="btn-delete-preview">预览影响</button>
+          <button class="btn btn-danger" id="btn-delete-apply">执行删除</button>
+        </div>
+        <div class="action-result" id="delete-result"></div>
+      </section>
+
+      <section class="card">
+        <h2>追加 <small>写入新数据文件</small></h2>
+        <div class="json-editor">
+          <textarea id="append-json" spellcheck="false" rows="9"></textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btn-append">追加为新版本</button>
+        </div>
+        <div class="action-result" id="append-result"></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>合并 <small>重写文件并清除已删除位置</small></h2>
+      <div class="merge-controls">
+        <label class="row-label">基线版本
+          <select id="merge-base"><option value="">当前 head</option></select>
+        </label>
+        <label class="row-label">选择文件（不选 = 合并全部）
+          <select id="merge-files" multiple size="4"></select>
+        </label>
+        <label class="row-label grow">说明
+          <input type="text" id="merge-note" maxlength="500" placeholder="例如：夜间小文件合并">
+        </label>
+        <div class="btn-row">
+          <button class="btn" id="btn-merge-plan">① 准备合并任务</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btn-merge-commit" disabled>② 提交</button>
+          <select id="crash-point">
+            <option value="">正常提交</option>
+            <option value="after_output_published">提交前注入崩溃（输出已发布）</option>
+            <option value="after_delete_sets_persisted">提交前注入崩溃（删除集已写）</option>
+            <option value="before_catalog_swap">提交前注入崩溃（目录尚未切换）</option>
+            <option value="after_catalog_swap">提交后注入崩溃（任务记录未更新）</option>
+          </select>
+          <button class="btn btn-ghost" id="btn-merge-abort" disabled>中止任务</button>
+        </div>
+        <div class="job-detail" id="job-detail"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>删除来源 <small>provenance</small></h2>
+      <div class="delete-events" id="delete-events"></div>
+    </section>
+
+    <section class="card">
+      <h2>任务与恢复 <small>jobs</small></h2>
+      <div class="jobs" id="job-list"></div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
